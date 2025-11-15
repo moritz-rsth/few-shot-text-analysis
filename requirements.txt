@@ -1,0 +1,6 @@
+pandas
+python-dotenv
+huggingface-hub
+scikit-learn
+# torch
+# transformers
