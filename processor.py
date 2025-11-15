@@ -164,7 +164,7 @@ class Processor:
                 # Extract target attributes and set them in the dataframe
                 for attr in config.target_attributes:
                     if attr.name in parsed:
-                        df_result.at[idx, attr.name] = parsed[attr.name]
+                        df_result.at[idx, attr.name] = parsed[attr.name] / 100
             else:
                 print(f"Warning: Failed to parse response for row {idx}")
 
@@ -247,7 +247,7 @@ class Processor:
                     result = {}
                     for attr in config.target_attributes:
                         if attr.name in parsed:
-                            result[attr.name] = parsed[attr.name]
+                            result[attr.name] = parsed[attr.name] / 100
                     return (idx, result)
                 else:
                     print(f"Warning: Failed to parse response for row {idx}")
