@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
@@ -72,6 +74,7 @@ class Processor:
         config: FewShotConfig,
         model: Optional[str] = None,
         temperature: float = 0,
+        save_path: Optional[str] = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
         """
@@ -90,6 +93,7 @@ class Processor:
             config: Few-shot configuration
             model: Optional model name for the LLM client
             temperature: Sampling temperature for LLM
+            save_path: Optional path to save results periodically (every 1000 rows)
             **kwargs: Additional arguments to pass to get_llm_response
             
         Returns:
@@ -111,12 +115,12 @@ class Processor:
         if use_parallel:
             # Parallel processing for remote API clients
             return self._process_parallel(
-                df_result, df_examples, client, config, model, temperature, **kwargs
+                df_result, df_examples, client, config, model, temperature, save_path, **kwargs
             )
         else:
             # Sequential processing (for local clients or threads=1)
             return self._process_sequential(
-                df_result, df_examples, client, config, model, temperature, **kwargs
+                df_result, df_examples, client, config, model, temperature, save_path, **kwargs
             )
 
     def _process_sequential(
@@ -127,9 +131,19 @@ class Processor:
         config: FewShotConfig,
         model: Optional[str],
         temperature: float,
+        save_path: Optional[str],
         **kwargs: Any,
     ) -> pd.DataFrame:
-        """Process rows sequentially."""
+        """Process rows sequentially with progress logging."""
+        total_rows = len(df_result)
+        processed = 0
+        start_time = time.time()
+        last_save_count = 0
+        save_interval = 1000
+
+        print(f"Processing {total_rows} rows sequentially...")
+        print("-" * 60)
+
         for idx, row in df_result.iterrows():
             # Build prompt
             messages = self.prompt(row, df_examples, config)
@@ -154,6 +168,38 @@ class Processor:
             else:
                 print(f"Warning: Failed to parse response for row {idx}")
 
+            processed += 1
+
+            # Progress logging
+            if processed % 10 == 0 or processed == total_rows:
+                elapsed_time = time.time() - start_time
+                if processed > 0:
+                    avg_time_per_row = elapsed_time / processed
+                    remaining_rows = total_rows - processed
+                    estimated_remaining = avg_time_per_row * remaining_rows
+                    
+                    progress_pct = (processed / total_rows) * 100
+                    print(
+                        f"Progress: {processed}/{total_rows} ({progress_pct:.1f}%) | "
+                        f"Elapsed: {self._format_time(elapsed_time)} | "
+                        f"ETA: {self._format_time(estimated_remaining)}"
+                    )
+
+            # Periodic saving
+            if save_path and processed - last_save_count >= save_interval:
+                self._save_checkpoint(df_result, save_path, processed)
+                last_save_count = processed
+
+        # Final save if save_path is provided
+        if save_path:
+            self._save_checkpoint(df_result, save_path, processed, final=True)
+
+        total_time = time.time() - start_time
+        print("-" * 60)
+        print(f"Completed! Processed {processed} rows in {self._format_time(total_time)}")
+        if processed > 0:
+            print(f"Average time per row: {total_time/processed:.2f}s")
+
         return df_result
 
     def _process_parallel(
@@ -164,9 +210,21 @@ class Processor:
         config: FewShotConfig,
         model: Optional[str],
         temperature: float,
+        save_path: Optional[str],
         **kwargs: Any,
     ) -> pd.DataFrame:
-        """Process rows in parallel using ThreadPoolExecutor."""
+        """Process rows in parallel using ThreadPoolExecutor with progress logging."""
+        total_rows = len(df_result)
+        processed = 0
+        start_time = time.time()
+        last_save_count = 0
+        last_log_time = start_time
+        save_interval = 1000
+        log_interval = 10  # Log every 10 completed tasks
+
+        print(f"Processing {total_rows} rows in parallel ({config.threads} threads)...")
+        print("-" * 60)
+
         def process_row(idx_row):
             idx, row = idx_row
             try:
@@ -212,5 +270,73 @@ class Processor:
                     for attr_name, value in parsed.items():
                         df_result.at[idx, attr_name] = value
 
+                processed += 1
+
+                # Progress logging (check periodically to avoid too frequent prints)
+                current_time = time.time()
+                if processed % log_interval == 0 or processed == total_rows or (current_time - last_log_time) >= 2.0:
+                    elapsed_time = current_time - start_time
+                    if processed > 0:
+                        avg_time_per_row = elapsed_time / processed
+                        remaining_rows = total_rows - processed
+                        estimated_remaining = avg_time_per_row * remaining_rows
+                        
+                        progress_pct = (processed / total_rows) * 100
+                        print(
+                            f"Progress: {processed}/{total_rows} ({progress_pct:.1f}%) | "
+                            f"Elapsed: {self._format_time(elapsed_time)} | "
+                            f"ETA: {self._format_time(estimated_remaining)}"
+                        )
+                        last_log_time = current_time
+
+                # Periodic saving
+                if save_path and processed - last_save_count >= save_interval:
+                    self._save_checkpoint(df_result, save_path, processed)
+                    last_save_count = processed
+
+        # Final save if save_path is provided
+        if save_path:
+            self._save_checkpoint(df_result, save_path, processed, final=True)
+
+        total_time = time.time() - start_time
+        print("-" * 60)
+        print(f"Completed! Processed {processed} rows in {self._format_time(total_time)}")
+        if processed > 0:
+            print(f"Average time per row: {total_time/processed:.2f}s")
+
         return df_result
+
+    def _format_time(self, seconds: float) -> str:
+        """Format seconds into a human-readable time string."""
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        elif seconds < 3600:
+            minutes = int(seconds // 60)
+            secs = int(seconds % 60)
+            return f"{minutes}m {secs}s"
+        else:
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            secs = int(seconds % 60)
+            return f"{hours}h {minutes}m {secs}s"
+
+    def _save_checkpoint(
+        self,
+        df_result: pd.DataFrame,
+        save_path: str,
+        processed: int,
+        final: bool = False,
+    ) -> None:
+        """Save checkpoint of current results."""
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
+            
+            # Save to CSV
+            df_result.to_csv(save_path, index=False)
+            
+            status = "Final" if final else "Checkpoint"
+            print(f"\n[{status}] Saved results to {save_path} ({processed} rows processed)")
+        except Exception as e:
+            print(f"Warning: Failed to save checkpoint to {save_path}: {e}")
 

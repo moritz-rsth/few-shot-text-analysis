@@ -51,7 +51,6 @@ CTR_CVR_prediction_config = FewShotConfig(
     icl_attributes=["ad_title", "image_description", "iab_category"],
     few_shot_examples_attributes=["ad_title", "image_description", "iab_category", "CTR", "CVR"],
     nr_few_shot_examples=1,
-    threads=1,
 )
 
 
